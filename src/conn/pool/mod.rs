@@ -245,7 +245,7 @@ impl Pool {
     ///
     /// **Note:** This Future won't resolve until all active connections, taken from it,
     /// are dropped or disonnected. Also all pending and new `GetConn`'s will resolve to error.
-    pub fn disconnect(self) -> DisconnectPool {
+    pub fn disconnect(&mut self) -> DisconnectPool {
         DisconnectPool::new(self)
     }
 

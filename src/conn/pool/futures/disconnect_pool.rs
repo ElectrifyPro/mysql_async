@@ -13,15 +13,13 @@ use std::{
 };
 
 use futures_core::ready;
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    conn::pool::{Inner, Pool, QUEUE_END_ID},
+    conn::pool::{Pool, QUEUE_END_ID},
     error::Error,
-    Conn,
 };
 
-use std::sync::{atomic, Arc};
+use std::sync::atomic;
 
 /// Future that disconnects this pool from a server and resolves to `()`.
 ///
@@ -29,45 +27,47 @@ use std::sync::{atomic, Arc};
 /// are dropped or disonnected. Also all pending and new `GetConn`'s will resolve to error.
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct DisconnectPool {
-    pool_inner: Arc<Inner>,
-    drop: Option<UnboundedSender<Option<Conn>>>,
+pub struct DisconnectPool<'a> {
+    pool: &'a mut Pool,
+    drop: bool,
 }
 
-impl DisconnectPool {
-    pub(crate) fn new(pool: Pool) -> Self {
+impl<'a> DisconnectPool<'a> {
+    pub(crate) fn new(pool: &'a mut Pool) -> Self {
         Self {
-            pool_inner: pool.inner,
-            drop: Some(pool.drop),
+            pool,
+            drop: true,
         }
     }
 }
 
-impl Future for DisconnectPool {
+impl Future for DisconnectPool<'_> {
     type Output = Result<(), Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.pool_inner.close.store(true, atomic::Ordering::Release);
-        let mut exchange = self.pool_inner.exchange.lock().unwrap();
-        exchange.spawn_futures_if_needed(&self.pool_inner);
+        self.pool.inner.close.store(true, atomic::Ordering::Release);
+        let mut exchange = self.pool.inner.exchange.lock().unwrap();
+        exchange.spawn_futures_if_needed(&self.pool.inner);
         exchange.waiting.push(cx.waker().clone(), QUEUE_END_ID);
         drop(exchange);
 
-        if self.pool_inner.closed.load(atomic::Ordering::Acquire) {
+        if self.pool.inner.closed.load(atomic::Ordering::Acquire) {
             Poll::Ready(Ok(()))
         } else {
-            match self.drop.take() {
-                Some(drop) => match drop.send(None) {
+            match self.drop {
+                true => match self.pool.drop.send(None) {
                     Ok(_) => {
                         // Recycler is alive. Waiting for it to finish.
-                        Poll::Ready(Ok(ready!(Box::pin(drop.closed()).as_mut().poll(cx))))
+                        self.drop = false;
+                        Poll::Ready(Ok(ready!(Box::pin(self.pool.drop.closed()).as_mut().poll(cx))))
                     }
                     Err(_) => {
                         // Recycler seem dead. No one will wake us.
+                        self.drop = false;
                         Poll::Ready(Ok(()))
                     }
                 },
-                None => Poll::Pending,
+                false => Poll::Pending,
             }
         }
     }
